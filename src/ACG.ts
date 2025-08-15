@@ -24,66 +24,8 @@ class Provider {
             throw new Error(`Failed to fetch search results from acg.rip, status: ${response.status}`);
         }
         const html = await response.text();
-        const $ = LoadDoc(html);
-
-        const torrents: AnimeTorrent[] = [];
-
-        $("table.post-index > tbody > tr").each((i, el) => {
-            const titleElement = el.find("td.title > span.title > a");
-            const dateElement = el.find("td.date time");
-            const sizeElement = el.find("td.size");
-            const downloadElement = el.find("td.action > a");
-            const releaseGroupElement = el.find("td.title > span.label-team > a");
-
-            const name = titleElement.text().trim();
-            const link = this.api + titleElement.attr("href");
-            const downloadUrl = this.api + downloadElement.attr("href");
-            const sizeStr = sizeElement.text().trim();
-            const timestamp = dateElement.attr("datetime");
-            const releaseGroup = releaseGroupElement.text().trim() || "";
-
-            torrents.push({
-                name: name,
-                date: this.parseDate(timestamp),
-                size: this.parseSize(sizeStr),
-                formattedSize: sizeStr,
-                seeders: 0, // Not available from the website
-                leechers: 0, // Not available from the website
-                downloadCount: 0, // Not available from the website
-                link: link,
-                downloadUrl: downloadUrl,
-                releaseGroup: releaseGroup,
-                magnetLink: "", 
-                infoHash: "",
-                resolution: this.parseResolution(name), // <-- ADDED THIS
-                isBatch: false,
-                episodeNumber: -1,
-                isBestRelease: false,
-                confirmed: false,
-            });
-        });
-
-        return torrents;
-    }
-
-    // This provider does not support smart search.
-    async smartSearch(opts: AnimeSmartSearchOptions): Promise<AnimeTorrent[]> {
-        return [];
-    }
-    
-    // This function will get the magnet link from the torrent's detail page.
-    async getTorrentMagnetLink(torrent: AnimeTorrent): Promise<string> {
-        try {
-            const response = await fetch(torrent.link);
-            if (!response.ok) { return ""; }
-            const html = await response.text();
-            const $ = LoadDoc(html);
-            const magnetLink = $("a[href^='magnet:']").attr("href");
-            return magnetLink || "";
-        } catch (error) {
-            console.error("Failed to fetch magnet link:", error);
-            return "";
-        }
+        
+        return this.parseResults(html);
     }
 
     // Get the latest torrents from the homepage.
@@ -91,9 +33,15 @@ class Provider {
         const response = await fetch(this.api);
         if (!response.ok) { return []; }
         const html = await response.text();
-        const $ = LoadDoc(html);
         
+        return this.parseResults(html);
+    }
+
+    // Main parsing function for both search and latest results.
+    private parseResults(html: string): AnimeTorrent[] {
+        const $ = LoadDoc(html);
         const torrents: AnimeTorrent[] = [];
+
         $("table.post-index > tbody > tr").each((i, el) => {
             const titleElement = el.find("td.title > span.title > a");
             const dateElement = el.find("td.date time");
@@ -101,12 +49,24 @@ class Provider {
             const downloadElement = el.find("td.action > a");
             const releaseGroupElement = el.find("td.title > span.label-team > a");
 
-            const name = titleElement.text().trim();
+            let name = titleElement.text().trim();
+            let releaseGroup = releaseGroupElement.text().trim();
+            
+            // --- NEW LOGIC TO PARSE RELEASE GROUP FROM TITLE ---
+            // If we didn't find a release group from the special tag, try to parse it from the title.
+            if (!releaseGroup && name.startsWith('[')) {
+                const match = name.match(/^\[([^\]]+)\]/);
+                if (match && match[1]) {
+                    releaseGroup = match[1];
+                    // Remove the group from the beginning of the title
+                    name = name.substring(match[0].length).trim();
+                }
+            }
+
             const link = this.api + titleElement.attr("href");
             const downloadUrl = this.api + downloadElement.attr("href");
             const sizeStr = sizeElement.text().trim();
             const timestamp = dateElement.attr("datetime");
-            const releaseGroup = releaseGroupElement.text().trim() || "";
 
             torrents.push({
                 name: name,
@@ -119,9 +79,9 @@ class Provider {
                 link: link,
                 downloadUrl: downloadUrl,
                 releaseGroup: releaseGroup,
-                magnetLink: "",
+                magnetLink: "", 
                 infoHash: "",
-                resolution: this.parseResolution(name), // <-- ADDED THIS
+                resolution: this.parseResolution(name),
                 isBatch: false,
                 episodeNumber: -1,
                 isBestRelease: false,
@@ -132,17 +92,35 @@ class Provider {
         return torrents;
     }
 
-    /**
-     * Helper function to parse resolution (e.g., "1080p") from a title.
-     */
+    // This provider does not support smart search.
+    async smartSearch(opts: AnimeSearchOptions): Promise<AnimeTorrent[]> {
+        return [];
+    }
+    
+    // This function downloads the .torrent file and converts it to a magnet link.
+    async getTorrentMagnetLink(torrent: AnimeTorrent): Promise<string> {
+        try {
+            const response = await fetch(torrent.downloadUrl);
+            if (!response.ok) {
+                console.error("Failed to download .torrent file");
+                return "";
+            }
+            const torrentData = await response.text();
+            
+            const magnetLink = $torrentUtils.getMagnetLinkFromTorrentData(torrentData);
+            return magnetLink || "";
+
+        } catch (error) {
+            console.error("Error creating magnet link from .torrent file:", error);
+            return "";
+        }
+    }
+
     private parseResolution(title: string): string {
         const match = title.match(/\b(\d{3,4}p)\b/i);
         return match ? match[1] : "";
     }
 
-    /**
-     * Helper function to parse a size string (e.g., "89.3 GB") into bytes.
-     */
     private parseSize(sizeStr: string): number {
         const sizeMatch = sizeStr.match(/([\d\.]+)\s*(GB|MB|KB)/i);
         if (!sizeMatch) return 0;
@@ -154,9 +132,6 @@ class Provider {
         return 0;
     }
 
-    /**
-     * Helper function to convert a Unix timestamp to an ISO 8601 date string.
-     */
     private parseDate(timestamp: string): string {
         if (!timestamp) return "";
         const date = new Date(parseInt(timestamp) * 1000);
